@@ -1,0 +1,67 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:password@db:5432/ragllm
+      - REDIS_URL=redis://redis:6379/0
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+    volumes:
+      - ./data:/app/data
+      - ./app:/app/app
+    depends_on:
+      - db
+      - redis
+      - chromadb
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ragllm
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=9000
+    volumes:
+      - chroma_data:/chroma/chroma
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  chroma_data:
+
+networks:
+  rag-network:
+    driver: bridge
