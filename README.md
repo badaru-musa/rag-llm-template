@@ -130,23 +130,6 @@ rag-llm-template/
 └── requirements.txt     # Python dependencies
 ```
 
-### Service Architecture
-```
-                       ┌─────────────────┐
-                       │   FastAPI App   │
-                       │  (Main Service) │
-                       │   Port: 8000    │
-                       └─────────────────┘
-                                │
-                ┌───────────────┼───────────────┐
-                │               │               │
-       ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-       │   PostgreSQL    │ │    ChromaDB     │ │     Redis       │
-       │   (User Data)   │ │ (Vector Store)  │ │   (Caching)     │
-       │   Port: 5432    │ │   Port: 8001    │ │   Port: 6379    │
-       └─────────────────┘ └─────────────────┘ └─────────────────┘
-```
-
 ## Configuration Options
 
 ### LLM Providers
@@ -307,72 +290,6 @@ The application exposes metrics for:
 - Document processing times
 - Vector search performance
 
-## Deployment
-
-### Production Deployment
-1. **Environment Variables:** Ensure all production secrets are configured
-2. **SSL/TLS:** Configure HTTPS with a reverse proxy (nginx, traefik, etc.)
-3. **Database:** Use managed PostgreSQL service
-4. **Storage:** Configure persistent volumes for data
-5. **Monitoring:** Set up application monitoring
-6. **Backup:** Implement backup strategies for data
-
-### Scaling Considerations
-- **Horizontal Scaling:** Multiple FastAPI instances behind load balancer
-- **Database:** Read replicas for improved performance
-- **Vector Store:** ChromaDB clustering for large datasets
-- **Caching:** Redis cluster for high availability
-
-## Security
-
-### Best Practices Implemented
-- ✅ JWT tokens with expiration
-- ✅ Password hashing with bcrypt
-- ✅ Input validation and sanitization
-- ✅ File upload restrictions
-- ✅ CORS configuration
-- ✅ Rate limiting ready
-- ✅ Secure headers
-
-### Additional Security Recommendations
-- Configure rate limiting
-- Implement API key management
-- Set up WAF (Web Application Firewall)
-- Enable audit logging
-- Regular security updates
-
-## Troubleshooting
-
-### Common Issues
-
-**1. ChromaDB Connection Failed**
-```bash
-# Check if ChromaDB service is running
-docker compose ps chromadb
-
-# Check logs
-docker compose logs chromadb
-```
-
-**2. Database Connection Error**
-```bash
-# Verify PostgreSQL is running
-docker compose ps db
-
-# Check database logs
-docker compose logs db
-```
-
-**3. LLM API Errors**
-- Verify API keys are correct
-- Check API quotas and limits
-- Ensure proper model permissions
-
-**4. File Upload Issues**
-- Check file size limits
-- Verify file type restrictions
-- Ensure proper permissions
-
 ## Contributing
 
 1. Fork the repository
@@ -381,19 +298,6 @@ docker compose logs db
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Support
-
-For questions and support:
-- 📧 Email: [your-email@example.com]
-- 💬 Discussions: GitHub Discussions
-- 🐛 Issues: GitHub Issues
-- 📖 Documentation: `/docs` endpoint when running
-
-## Changelog
 
 ### v1.0.0
 - Initial release
@@ -403,6 +307,4 @@ For questions and support:
 - Document processing pipeline
 - Docker Compose deployment
 
----
 
-**Built with ❤️ for the AI community**
