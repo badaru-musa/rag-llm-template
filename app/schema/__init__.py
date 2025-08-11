@@ -100,9 +100,15 @@ class DocumentChunk(BaseSchema):
 
 class ChatMessage(BaseSchema):
     """Chat message schema"""
+    id: Optional[int] = Field(None, description="Message ID")
     role: ChatRole = Field(..., description="Message role")
     content: str = Field(..., description="Message content")
+    original_content: Optional[str] = Field(None, description="Original content before edits")
+    is_edited: bool = Field(default=False, description="Whether message was edited")
+    edit_count: int = Field(default=0, description="Number of times edited")
+    like_status: Optional[str] = Field(None, description="Like status: 'liked', 'disliked', or null")
     timestamp: Optional[datetime] = Field(default_factory=datetime.utcnow, description="Message timestamp")
+    updated_at: Optional[datetime] = Field(None, description="Last update timestamp")
 
 
 class ChatRequest(BaseSchema):
@@ -165,3 +171,129 @@ class FileUploadResponse(BaseSchema):
     file_size: int = Field(..., description="File size in bytes")
     file_type: str = Field(..., description="File type")
     document_id: int = Field(..., description="Created document ID")
+
+
+class RoleBase(BaseSchema):
+    """Base role schema"""
+    name: str = Field(..., min_length=3, max_length=100, description="Role name")
+    description: Optional[str] = Field(None, description="Role description")
+    permissions: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Role permissions")
+
+
+class RoleCreate(RoleBase):
+    """Role creation schema"""
+    pass
+
+
+class RoleUpdate(BaseSchema):
+    """Role update schema"""
+    name: Optional[str] = Field(None, min_length=3, max_length=100)
+    description: Optional[str] = None
+    permissions: Optional[Dict[str, Any]] = None
+
+
+class RoleResponse(RoleBase):
+    """Role response schema"""
+    id: int = Field(..., description="Role ID")
+    created_by: int = Field(..., description="Creator user ID")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+    
+    class Config:
+        from_attributes = True
+
+
+class DocumentPermissionBase(BaseSchema):
+    """Base document permission schema"""
+    document_id: int = Field(..., description="Document ID")
+    user_id: Optional[int] = Field(None, description="User ID (either user_id or role_id required)")
+    role_id: Optional[int] = Field(None, description="Role ID (either user_id or role_id required)")
+    can_read: bool = Field(default=True, description="Read permission")
+    can_write: bool = Field(default=False, description="Write permission")
+    can_delete: bool = Field(default=False, description="Delete permission")
+    can_share: bool = Field(default=False, description="Share permission")
+    expires_at: Optional[datetime] = Field(None, description="Permission expiration")
+
+
+class DocumentPermissionCreate(DocumentPermissionBase):
+    """Document permission creation schema"""
+    pass
+
+
+class DocumentPermissionUpdate(BaseSchema):
+    """Document permission update schema"""
+    can_read: Optional[bool] = None
+    can_write: Optional[bool] = None
+    can_delete: Optional[bool] = None
+    can_share: Optional[bool] = None
+    expires_at: Optional[datetime] = None
+
+
+class DocumentPermissionResponse(DocumentPermissionBase):
+    """Document permission response schema"""
+    id: int = Field(..., description="Permission ID")
+    granted_by: int = Field(..., description="Granter user ID")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+    
+    class Config:
+        from_attributes = True
+
+
+class MessageSearchRequest(BaseSchema):
+    """Message search request schema"""
+    query: str = Field(..., min_length=1, description="Search query")
+    limit: int = Field(default=10, ge=1, le=50, description="Maximum results to return")
+    offset: int = Field(default=0, ge=0, description="Results offset for pagination")
+
+
+class MessageUpdateRequest(BaseSchema):
+    """Message update request schema"""
+    content: str = Field(..., min_length=1, description="New message content")
+
+
+class MessageLikeRequest(BaseSchema):
+    """Message like/dislike request schema"""
+    like_status: str = Field(..., pattern="^(liked|disliked|none)$", description="Like status: liked, disliked, or none")
+
+
+class RegenerateRequest(BaseSchema):
+    """Regenerate response request schema"""
+    use_vector_search: Optional[bool] = Field(None, description="Whether to use vector search")
+    max_chunks: Optional[int] = Field(None, ge=1, le=20, description="Maximum chunks to retrieve")
+
+
+class ConversationExportRequest(BaseSchema):
+    """Conversation export request schema"""
+    format: str = Field(..., pattern="^(pdf|csv|txt)$", description="Export format: pdf, csv, or txt")
+    include_metadata: bool = Field(default=True, description="Include message metadata")
+    include_timestamps: bool = Field(default=True, description="Include timestamps")
+
+
+class MessageResponse(BaseSchema):
+    """Enhanced message response schema"""
+    id: int = Field(..., description="Message ID")
+    role: str = Field(..., description="Message role")
+    content: str = Field(..., description="Message content")
+    original_content: Optional[str] = Field(None, description="Original content before edits")
+    is_edited: bool = Field(default=False, description="Whether message was edited")
+    edit_count: int = Field(default=0, description="Number of times edited")
+    like_status: Optional[str] = Field(None, description="Like status")
+    conversation_id: str = Field(..., description="Conversation ID")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+    meta: Dict[str, Any] = Field(default_factory=dict, description="Message metadata")
+    
+    class Config:
+        from_attributes = True
+
+
+class ConversationMessagesResponse(BaseSchema):
+    """Response schema for conversation messages"""
+    conversation_id: str = Field(..., description="Conversation ID")
+    title: Optional[str] = Field(None, description="Conversation title")
+    total_messages: int = Field(..., description="Total number of messages")
+    messages: List[MessageResponse] = Field(..., description="List of messages")
+    
+    class Config:
+        from_attributes = True

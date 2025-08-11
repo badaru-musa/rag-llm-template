@@ -9,11 +9,13 @@ Provides functionality to:
 - Get user statistics
 """
 
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
 from datetime import datetime
+import json
 
 from app.auth.dependencies import get_current_active_user
 from app.dependencies import get_auth_service, get_database_session
@@ -572,7 +574,9 @@ async def get_system_overview(
 
 @router.post("/roles", response_model=RoleResponse, status_code=status.HTTP_201_CREATED)
 async def create_role(
-    role_data: RoleCreate,
+    name: str = Query(..., min_length=3, max_length=100, description="Role name", example="content_editor"),
+    description: Optional[str] = Query(None, description="Role description", example="Users who can edit content"),
+    permissions: Optional[str] = Query(None, description="Role permissions as JSON string", example='{"documents": {"create": true, "edit": true}}'),
     current_admin: UserResponse = Depends(require_admin_role),
     db: AsyncSession = Depends(get_database_session)
 ):
@@ -581,24 +585,45 @@ async def create_role(
     
     This endpoint allows administrators to create custom roles with specific permissions.
     Roles can be assigned to users and used to control access to documents and features.
+    
+    **Example usage:**
+    ```
+    POST /admin/roles?name=content_editor&description=Users who can edit content&permissions={"documents":{"create":true,"edit":true}}
+    ```
+    
+    **Parameters:**
+    - name: Role name (required, 3-100 characters)
+    - description: Role description (optional)  
+    - permissions: Role permissions as JSON string (optional)
     """
     try:
+        # Parse permissions JSON string if provided
+        permissions_dict = {}
+        if permissions:
+            try:
+                permissions_dict = json.loads(permissions)
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid JSON format for permissions parameter"
+                )
+        
         # Check if role with same name already exists
-        existing_role_stmt = select(Role).where(Role.name == role_data.name)
+        existing_role_stmt = select(Role).where(Role.name == name)
         existing_role_result = await db.execute(existing_role_stmt)
         existing_role = existing_role_result.scalar_one_or_none()
         
         if existing_role:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Role with name '{role_data.name}' already exists"
+                detail=f"Role with name '{name}' already exists"
             )
         
         # Create new role
         new_role = Role(
-            name=role_data.name,
-            description=role_data.description,
-            permissions=role_data.permissions or {},
+            name=name,
+            description=description,
+            permissions=permissions_dict,
             created_by=current_admin.id
         )
         
@@ -606,7 +631,7 @@ async def create_role(
         await db.commit()
         await db.refresh(new_role)
         
-        logger.info(f"Admin {current_admin.username} created new role: {role_data.name}")
+        logger.info(f"Admin {current_admin.username} created new role: {name}")
         
         return RoleResponse(
             id=new_role.id,
@@ -631,8 +656,9 @@ async def create_role(
 
 @router.get("/roles", response_model=List[RoleResponse])
 async def list_roles(
-    skip: int = 0,
-    limit: int = 50,
+    skip: int = Query(default=0, ge=0, description="Number of roles to skip for pagination", example=0),
+    limit: int = Query(default=50, ge=1, le=100, description="Maximum number of roles to return", example=10),
+    name_filter: Optional[str] = Query(None, description="Filter roles by name (partial match)", example="editor"),
     current_admin: UserResponse = Depends(require_admin_role),
     db: AsyncSession = Depends(get_database_session)
 ):
@@ -640,9 +666,26 @@ async def list_roles(
     List all custom roles (Admin only).
     
     This endpoint allows administrators to view all custom roles in the system.
+    
+    **Example usage:**
+    ```
+    GET /admin/roles?skip=0&limit=10&name_filter=editor
+    ```
+    
+    **Parameters:**
+    - skip: Number of roles to skip for pagination (default: 0)
+    - limit: Maximum number of roles to return (default: 50, max: 100)  
+    - name_filter: Filter roles by name (partial match, optional)
     """
     try:
-        query = select(Role).order_by(Role.created_at.desc()).offset(skip).limit(limit)
+        query = select(Role)
+        
+        # Apply name filter if provided
+        if name_filter:
+            query = query.where(Role.name.ilike(f"%{name_filter}%"))
+        
+        # Apply ordering and pagination
+        query = query.order_by(Role.created_at.desc()).offset(skip).limit(limit)
         result = await db.execute(query)
         roles = result.scalars().all()
         
@@ -667,7 +710,13 @@ async def list_roles(
 @router.post("/documents/{document_id}/permissions", response_model=DocumentPermissionResponse, status_code=status.HTTP_201_CREATED)
 async def create_document_permission(
     document_id: int,
-    permission_data: DocumentPermissionCreate,
+    user_id: Optional[int] = Query(None, description="User ID (either user_id or role_id required)", example=123),
+    role_id: Optional[int] = Query(None, description="Role ID (either user_id or role_id required)", example=456),
+    can_read: bool = Query(default=True, description="Read permission", example=True),
+    can_write: bool = Query(default=False, description="Write permission", example=False),
+    can_delete: bool = Query(default=False, description="Delete permission", example=False),
+    can_share: bool = Query(default=False, description="Share permission", example=True),
+    expires_at: Optional[str] = Query(None, description="Permission expiration (ISO format)", example="2024-12-31T23:59:59"),
     current_admin: UserResponse = Depends(require_admin_role),
     db: AsyncSession = Depends(get_database_session)
 ):
@@ -676,8 +725,35 @@ async def create_document_permission(
     
     This endpoint allows administrators to control who has access to specific documents.
     Permissions can be granted to individual users or to roles.
+    
+    **Example usage:**
+    ```
+    POST /admin/documents/123/permissions?user_id=456&can_read=true&can_write=true&expires_at=2024-12-31T23:59:59
+    ```
+    
+    **Parameters:**
+    - document_id: Document ID (path parameter)
+    - user_id: User ID (optional, either user_id or role_id required)
+    - role_id: Role ID (optional, either user_id or role_id required)  
+    - can_read: Read permission (default: true)
+    - can_write: Write permission (default: false)
+    - can_delete: Delete permission (default: false)
+    - can_share: Share permission (default: false)
+    - expires_at: Permission expiration in ISO format (optional)
     """
     try:
+        # Parse expires_at if provided
+        expires_at_dt = None
+        if expires_at:
+            try:
+                from datetime import datetime
+                expires_at_dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid date format for expires_at. Use ISO format: YYYY-MM-DDTHH:MM:SS"
+                )
+        
         # Verify the document exists and belongs to the admin
         document_stmt = select(Document).where(Document.id == document_id)
         document_result = await db.execute(document_stmt)
@@ -697,21 +773,21 @@ async def create_document_permission(
             )
         
         # Validate that either user_id or role_id is provided, but not both
-        if not permission_data.user_id and not permission_data.role_id:
+        if not user_id and not role_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Either user_id or role_id must be provided"
             )
         
-        if permission_data.user_id and permission_data.role_id:
+        if user_id and role_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot specify both user_id and role_id"
             )
         
         # If user_id provided, verify the user exists
-        if permission_data.user_id:
-            user_stmt = select(User).where(User.id == permission_data.user_id)
+        if user_id:
+            user_stmt = select(User).where(User.id == user_id)
             user_result = await db.execute(user_stmt)
             user = user_result.scalar_one_or_none()
             if not user:
@@ -721,8 +797,8 @@ async def create_document_permission(
                 )
         
         # If role_id provided, verify the role exists
-        if permission_data.role_id:
-            role_stmt = select(Role).where(Role.id == permission_data.role_id)
+        if role_id:
+            role_stmt = select(Role).where(Role.id == role_id)
             role_result = await db.execute(role_stmt)
             role = role_result.scalar_one_or_none()
             if not role:
@@ -736,8 +812,8 @@ async def create_document_permission(
             and_(
                 DocumentPermission.document_id == document_id,
                 or_(
-                    DocumentPermission.user_id == permission_data.user_id,
-                    DocumentPermission.role_id == permission_data.role_id
+                    DocumentPermission.user_id == user_id,
+                    DocumentPermission.role_id == role_id
                 )
             )
         )
@@ -753,21 +829,21 @@ async def create_document_permission(
         # Create new permission
         new_permission = DocumentPermission(
             document_id=document_id,
-            user_id=permission_data.user_id,
-            role_id=permission_data.role_id,
-            can_read=permission_data.can_read,
-            can_write=permission_data.can_write,
-            can_delete=permission_data.can_delete,
-            can_share=permission_data.can_share,
+            user_id=user_id,
+            role_id=role_id,
+            can_read=can_read,
+            can_write=can_write,
+            can_delete=can_delete,
+            can_share=can_share,
             granted_by=current_admin.id,
-            expires_at=permission_data.expires_at
+            expires_at=expires_at_dt
         )
         
         db.add(new_permission)
         await db.commit()
         await db.refresh(new_permission)
         
-        target = f"user {permission_data.user_id}" if permission_data.user_id else f"role {permission_data.role_id}"
+        target = f"user {user_id}" if user_id else f"role {role_id}"
         logger.info(f"Admin {current_admin.username} granted document permissions to {target} for document {document_id}")
         
         return DocumentPermissionResponse(
@@ -799,6 +875,9 @@ async def create_document_permission(
 @router.get("/documents/{document_id}/permissions", response_model=List[DocumentPermissionResponse])
 async def list_document_permissions(
     document_id: int,
+    user_id_filter: Optional[int] = Query(None, description="Filter permissions by user ID", example=123),
+    role_id_filter: Optional[int] = Query(None, description="Filter permissions by role ID", example=456),
+    active_only: bool = Query(default=True, description="Show only non-expired permissions", example=True),
     current_admin: UserResponse = Depends(require_admin_role),
     db: AsyncSession = Depends(get_database_session)
 ):
@@ -806,6 +885,17 @@ async def list_document_permissions(
     List all permissions for a specific document (Admin only).
     
     This endpoint allows administrators to view who has access to a specific document.
+    
+    **Example usage:**
+    ```
+    GET /admin/documents/123/permissions?user_id_filter=456&active_only=true
+    ```
+    
+    **Parameters:**
+    - document_id: Document ID (path parameter)
+    - user_id_filter: Filter permissions by user ID (optional)
+    - role_id_filter: Filter permissions by role ID (optional)
+    - active_only: Show only non-expired permissions (default: true)
     """
     try:
         # Verify the document exists
@@ -819,8 +909,25 @@ async def list_document_permissions(
                 detail="Document not found"
             )
         
-        # Get all permissions for this document
+        # Get permissions for this document with filters
         permissions_stmt = select(DocumentPermission).where(DocumentPermission.document_id == document_id)
+        
+        # Apply filters
+        if user_id_filter:
+            permissions_stmt = permissions_stmt.where(DocumentPermission.user_id == user_id_filter)
+        
+        if role_id_filter:
+            permissions_stmt = permissions_stmt.where(DocumentPermission.role_id == role_id_filter)
+        
+        if active_only:
+            from datetime import datetime
+            permissions_stmt = permissions_stmt.where(
+                or_(
+                    DocumentPermission.expires_at.is_(None),
+                    DocumentPermission.expires_at > datetime.utcnow()
+                )
+            )
+        
         permissions_result = await db.execute(permissions_stmt)
         permissions = permissions_result.scalars().all()
         
@@ -853,6 +960,7 @@ async def list_document_permissions(
 async def revoke_document_permission(
     document_id: int,
     permission_id: int,
+    reason: Optional[str] = Query(None, description="Reason for revoking permission", example="User no longer needs access"),
     current_admin: UserResponse = Depends(require_admin_role),
     db: AsyncSession = Depends(get_database_session)
 ):
@@ -860,6 +968,16 @@ async def revoke_document_permission(
     Revoke document permission (Admin only).
     
     This endpoint allows administrators to revoke previously granted document permissions.
+    
+    **Example usage:**
+    ```
+    DELETE /admin/documents/123/permissions/456?reason=User no longer needs access
+    ```
+    
+    **Parameters:**
+    - document_id: Document ID (path parameter)
+    - permission_id: Permission ID to revoke (path parameter)
+    - reason: Optional reason for revoking permission (query parameter)
     """
     try:
         # Get the permission to revoke
@@ -894,9 +1012,15 @@ async def revoke_document_permission(
         await db.commit()
         
         target = f"user {permission.user_id}" if permission.user_id else f"role {permission.role_id}"
-        logger.info(f"Admin {current_admin.username} revoked document permission from {target} for document {document_id}")
+        reason_msg = f" Reason: {reason}" if reason else ""
+        logger.info(f"Admin {current_admin.username} revoked document permission from {target} for document {document_id}.{reason_msg}")
         
-        return {"message": "Document permission revoked successfully"}
+        return {
+            "message": "Document permission revoked successfully",
+            "permission_id": permission_id,
+            "target": target,
+            "reason": reason
+        }
         
     except HTTPException:
         raise

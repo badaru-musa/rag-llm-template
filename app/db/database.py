@@ -4,7 +4,7 @@ from sqlalchemy import MetaData
 from config import settings
 
 engine = create_async_engine(
-    'postgresql+asyncpg://postgres:password@db:5432/ragllm',
+    settings.database_url,
     echo=settings.debug,
     pool_pre_ping=True,
     pool_recycle=300,

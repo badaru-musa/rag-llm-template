@@ -36,18 +36,25 @@ class ChatService:
         """Process a chat request and return response"""
         
         try:
+            logger.info("Step 1: Getting or creating conversation")
             # Get or create conversation
             conversation_id = request.conversation_id or str(uuid.uuid4())
             conversation = await self._get_or_create_conversation(conversation_id, user_id, db)
+            logger.info(f"Step 1 completed: Conversation {conversation_id} ready")
             
+            logger.info("Step 2: Getting conversation history")
             # Get conversation history
             chat_history = await self._get_conversation_history(conversation_id, db)
+            logger.info(f"Step 2 completed: Retrieved {len(chat_history)} messages")
             
+            logger.info("Step 3: Determining vector search settings")
             # Determine if vector search should be used
             use_vector_search = request.use_vector_search
             if use_vector_search is None:
                 use_vector_search = self.use_vector_search
+            logger.info(f"Step 3 completed: Using vector search = {use_vector_search}")
             
+            logger.info("Step 4: Retrieving relevant context")
             # Retrieve relevant context if enabled
             relevant_chunks = []
             if use_vector_search:
@@ -63,7 +70,9 @@ class ChatService:
                     similarity_threshold=0.3  # Lower threshold for better recall
                 )
                 logger.info(f"Retrieved {len(relevant_chunks)} chunks for query: {request.message[:50]}...")
+            logger.info(f"Step 4 completed: Retrieved {len(relevant_chunks)} chunks")
             
+            logger.info("Step 5: Building LLM messages")
             # Build messages for LLM
             messages = await self._build_llm_messages(
                 user_message=request.message,
@@ -71,18 +80,32 @@ class ChatService:
                 relevant_chunks=relevant_chunks,
                 use_vector_search=use_vector_search
             )
+            logger.info(f"Step 5 completed: Built {len(messages)} messages for LLM")
             
+            logger.info("Step 6: Generating LLM response")
             # Generate response from LLM
             response_content = await self.llm_service.generate_response(messages)
+            logger.info(f"Step 6 completed: Generated response with {len(response_content)} characters")
             
-            # Save user message and assistant response
-            await self._save_chat_messages(
-                conversation_id=conversation_id,
-                user_message=request.message,
-                assistant_response=response_content,
-                db=db
-            )
+            logger.info("Step 7: Saving chat messages")
+            # Create a fresh database session for saving messages to avoid transaction conflicts
+            from app.db.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as fresh_db:
+                try:
+                    await self._save_chat_messages(
+                        conversation_id=conversation_id,
+                        user_message=request.message,
+                        assistant_response=response_content,
+                        db=fresh_db
+                    )
+                    await fresh_db.commit()
+                    logger.info("Step 7 completed: Saved chat messages")
+                except Exception as e:
+                    await fresh_db.rollback()
+                    logger.error(f"Failed to save messages: {str(e)}")
+                    raise
             
+            logger.info("Step 8: Creating response object")
             # Create response
             response = ChatResponse(
                 message=response_content,
@@ -94,6 +117,7 @@ class ChatService:
                     "model_used": self.llm_service.__class__.__name__
                 }
             )
+            logger.info("Step 8 completed: Created response object")
             
             logger.info(f"Processed chat request for user {user_id}, conversation {conversation_id}")
             return response
@@ -201,9 +225,18 @@ class ChatService:
         """Get existing conversation or create new one"""
         
         if not db:
-            return None
+            logger.error("Database session is None")
+            raise DatabaseError("Database session not available")
         
         try:
+            logger.info(f"Getting/creating conversation {conversation_id} for user {user_id}")
+            
+            # Validate inputs
+            if not conversation_id or len(conversation_id.strip()) == 0:
+                raise ValueError("Conversation ID cannot be empty")
+            if not user_id or user_id <= 0:
+                raise ValueError("User ID must be a positive integer")
+            
             # Try to get existing conversation
             stmt = select(Conversation).where(
                 and_(
@@ -214,24 +247,48 @@ class ChatService:
             result = await db.execute(stmt)
             conversation = result.scalar_one_or_none()
             
-            if not conversation:
-                # Create new conversation
-                conversation = Conversation(
-                    id=conversation_id,
-                    user_id=user_id,
-                    title=None,  # Will be set later if needed
-                    meta={}
-                )
-                db.add(conversation)
-                await db.commit()
-                await db.refresh(conversation)
-                
-                logger.info(f"Created new conversation {conversation_id} for user {user_id}")
+            if conversation:
+                logger.info(f"Found existing conversation {conversation_id} for user {user_id}")
+                return conversation
             
+            # Check if conversation exists with different user (security check)
+            existing_stmt = select(Conversation).where(Conversation.id == conversation_id)
+            existing_result = await db.execute(existing_stmt)
+            existing_conversation = existing_result.scalar_one_or_none()
+            
+            if existing_conversation:
+                logger.warning(f"Conversation {conversation_id} exists but belongs to user {existing_conversation.user_id}, not {user_id}")
+                raise DatabaseError(f"Access denied to conversation {conversation_id}")
+            
+            # Create new conversation
+            logger.info(f"Creating new conversation {conversation_id} for user {user_id}")
+            conversation = Conversation(
+                id=conversation_id,
+                user_id=user_id,
+                title=None,  # Will be set later if needed
+                meta={}
+            )
+            db.add(conversation)
+            
+            # Flush to check for constraint violations before commit
+            await db.flush()
+            
+            # Commit the new conversation
+            await db.commit()
+            await db.refresh(conversation)
+            
+            logger.info(f"Successfully created conversation {conversation_id} for user {user_id}")
             return conversation
             
         except Exception as e:
-            logger.error(f"Error getting/creating conversation: {str(e)}")
+            logger.error(f"Error getting/creating conversation {conversation_id}: {type(e).__name__}: {str(e)}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            try:
+                await db.rollback()
+                logger.info("Database transaction rolled back successfully")
+            except Exception as rollback_error:
+                logger.error(f"Error during rollback: {str(rollback_error)}")
             raise DatabaseError(f"Failed to manage conversation: {str(e)}")
     
     async def _get_conversation_history(
@@ -322,9 +379,25 @@ class ChatService:
         """Save chat messages to database"""
         
         if not db:
+            logger.warning("Database session is None, cannot save messages")
             return
         
         try:
+            logger.info(f"Saving chat messages for conversation {conversation_id}")
+            
+            # Validate conversation_id
+            if not conversation_id or len(conversation_id.strip()) == 0:
+                raise ValueError("Conversation ID cannot be empty")
+            
+            # Ensure conversation exists first
+            stmt = select(Conversation).where(Conversation.id == conversation_id)
+            result = await db.execute(stmt)
+            conversation = result.scalar_one_or_none()
+            
+            if not conversation:
+                logger.error(f"Conversation {conversation_id} not found when saving messages")
+                raise DatabaseError(f"Conversation {conversation_id} does not exist")
+            
             # Save user message
             user_msg = ChatMessageModel(
                 conversation_id=conversation_id,
@@ -333,6 +406,10 @@ class ChatService:
                 meta={}
             )
             db.add(user_msg)
+            
+            # Flush to get the user message ID
+            await db.flush()
+            logger.info(f"Saved user message {user_msg.id} to conversation {conversation_id}")
             
             # Save assistant response
             assistant_msg = ChatMessageModel(
@@ -343,20 +420,22 @@ class ChatService:
             )
             db.add(assistant_msg)
             
-            # Update conversation message count
-            stmt = select(Conversation).where(Conversation.id == conversation_id)
-            result = await db.execute(stmt)
-            conversation = result.scalar_one_or_none()
+            # Flush to get the assistant message ID
+            await db.flush()
+            logger.info(f"Saved assistant message {assistant_msg.id} to conversation {conversation_id}")
             
-            if conversation:
-                conversation.message_count += 2
-                conversation.updated_at = datetime.utcnow()
+            # Update conversation message count and timestamp
+            conversation.message_count += 2
+            conversation.updated_at = datetime.utcnow()
             
-            await db.commit()
+            # Flush changes (commit is handled by caller)
+            await db.flush()
+            logger.info(f"Successfully flushed chat messages for conversation {conversation_id}")
             
         except Exception as e:
-            logger.error(f"Error saving chat messages: {str(e)}")
-            await db.rollback()
+            logger.error(f"Error saving chat messages for conversation {conversation_id}: {type(e).__name__}: {str(e)}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             raise DatabaseError(f"Failed to save chat messages: {str(e)}")
     
     async def get_conversation_list(
