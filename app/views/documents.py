@@ -71,17 +71,66 @@ async def upload_document(
                 }
             )
             
+            # Generate embeddings for chunks in batches
+            logger.info(f"Processing {len(chunks)} chunks for embeddings...")
+            chunks_with_embeddings = await document_processor.process_chunks_with_embeddings(chunks)
+            
+            # Store chunks in vector store with embeddings
+            from app.dependencies import get_vector_store
+            vector_store = get_vector_store()
+            
+            # Ensure vector store is initialized
+            if not vector_store.collection:
+                await vector_store.initialize()
+            
+            # Store chunks in vector store - process in batches to avoid issues
+            stored_count = 0
+            failed_chunks = []
+            batch_size = 5000  # Process in batches for vector store
+            
+            for i in range(0, len(chunks_with_embeddings), batch_size):
+                batch_end = min(i + batch_size, len(chunks_with_embeddings))
+                batch_chunks = chunks_with_embeddings[i:batch_end]
+                
+                # Filter out chunks without embeddings
+                valid_chunks = [chunk for chunk in batch_chunks if chunk.get("embedding") is not None]
+                
+                if valid_chunks:
+                    try:
+                        chunk_texts = [chunk["content"] for chunk in valid_chunks]
+                        chunk_metadatas = [chunk["meta"] for chunk in valid_chunks]
+                        chunk_ids = [chunk["id"] for chunk in valid_chunks]
+                        embeddings = [chunk["embedding"] for chunk in valid_chunks]
+                        
+                        # Store batch in vector store
+                        vector_store.collection.add(
+                            embeddings=embeddings,
+                            documents=chunk_texts,
+                            metadatas=chunk_metadatas,
+                            ids=chunk_ids
+                        )
+                        stored_count += len(valid_chunks)
+                        logger.info(f"Stored batch {i//batch_size + 1} ({len(valid_chunks)} chunks) in vector store")
+                        
+                    except Exception as batch_error:
+                        logger.error(f"Failed to store batch {i//batch_size + 1} in vector store: {str(batch_error)}")
+                        failed_chunks.extend([chunk["id"] for chunk in valid_chunks])
+            
+            logger.info(f"Successfully stored {stored_count}/{len(chunks_with_embeddings)} chunks in vector store for document {document.id}")
+            if failed_chunks:
+                logger.warning(f"Failed to store {len(failed_chunks)} chunks: {failed_chunks[:5]}...")
+            
             # Save document content
             document.content = content
-            document.chunk_count = len(chunks)
+            document.chunk_count = len(chunks_with_embeddings)
             document.status = DocumentStatus.COMPLETED.value
             
             # Save chunks to database
-            for chunk_data in chunks:
+            for chunk_data in chunks_with_embeddings:
                 chunk = DocumentChunkModel(
                     id=chunk_data["id"],
                     content=chunk_data["content"],
-                    chunk_index=chunk_data["metadata"]["chunk_index"],
+                    chunk_index=chunk_data["meta"]["chunk_index"],
                     meta=chunk_data["meta"],
                     document_id=document.id
                 )
@@ -316,7 +365,30 @@ async def get_document_chunks(
                 detail="Document not found"
             )
         
-        # Get chunks from retriever
+        # First try to get chunks from database
+        chunks_stmt = select(DocumentChunkModel).where(
+            DocumentChunkModel.document_id == document_id
+        ).order_by(DocumentChunkModel.chunk_index)
+        
+        chunks_result = await db.execute(chunks_stmt)
+        db_chunks = chunks_result.scalars().all()
+        
+        if db_chunks:
+            # Convert database chunks to response model
+            chunks = [
+                DocumentChunk(
+                    id=chunk.id,
+                    content=chunk.content,
+                    meta=chunk.meta or {},
+                    score=None
+                )
+                for chunk in db_chunks
+            ]
+            logger.info(f"Retrieved {len(chunks)} chunks from database for document {document_id}")
+            return chunks
+        
+        # Fallback to vector store if no chunks in database
+        logger.info(f"No chunks in database for document {document_id}, trying vector store")
         chunks = await document_retriever.retrieve_chunks_by_document(
             document_id=str(document_id),
             user_id=current_user.id
@@ -380,26 +452,85 @@ async def reprocess_document(
                 }
             )
             
-            # Delete old chunks
+            # Generate embeddings for chunks in batches
+            logger.info(f"Reprocessing {len(chunks)} chunks for embeddings...")
+            chunks_with_embeddings = await document_processor.process_chunks_with_embeddings(chunks)
+            
+            # Delete old chunks from database
             stmt = select(DocumentChunkModel).where(DocumentChunkModel.document_id == document.id)
             result = await db.execute(stmt)
             old_chunks = result.scalars().all()
+            old_chunk_ids = [chunk.id for chunk in old_chunks]
+            
+            # Delete old chunks from vector store
+            if old_chunk_ids:
+                from app.dependencies import get_vector_store
+                vector_store = get_vector_store()
+                if not vector_store.collection:
+                    await vector_store.initialize()
+                try:
+                    # Delete in batches to avoid issues
+                    for i in range(0, len(old_chunk_ids), 5000):
+                        batch_ids = old_chunk_ids[i:i+5000]
+                        await vector_store.delete_documents(batch_ids)
+                except Exception as e:
+                    logger.warning(f"Error deleting old chunks from vector store: {str(e)}")
+            
+            # Delete old chunks from database
             for chunk in old_chunks:
                 await db.delete(chunk)
             
-            # Save new chunks
-            for chunk_data in chunks:
+            # Store new chunks in vector store with embeddings - batch processing
+            from app.dependencies import get_vector_store
+            vector_store = get_vector_store()
+            if not vector_store.collection:
+                await vector_store.initialize()
+            
+            stored_count = 0
+            failed_chunks = []
+            batch_size = 5000
+            
+            for i in range(0, len(chunks_with_embeddings), batch_size):
+                batch_end = min(i + batch_size, len(chunks_with_embeddings))
+                batch_chunks = chunks_with_embeddings[i:batch_end]
+                
+                # Filter out chunks without embeddings
+                valid_chunks = [chunk for chunk in batch_chunks if chunk.get("embedding") is not None]
+                
+                if valid_chunks:
+                    try:
+                        chunk_texts = [chunk["content"] for chunk in valid_chunks]
+                        chunk_metadatas = [chunk["meta"] for chunk in valid_chunks]
+                        chunk_ids = [chunk["id"] for chunk in valid_chunks]
+                        embeddings = [chunk["embedding"] for chunk in valid_chunks]
+                        
+                        vector_store.collection.add(
+                            embeddings=embeddings,
+                            documents=chunk_texts,
+                            metadatas=chunk_metadatas,
+                            ids=chunk_ids
+                        )
+                        stored_count += len(valid_chunks)
+                        
+                    except Exception as batch_error:
+                        logger.error(f"Failed to store batch in vector store: {str(batch_error)}")
+                        failed_chunks.extend([chunk["id"] for chunk in valid_chunks])
+            
+            logger.info(f"Stored {stored_count}/{len(chunks_with_embeddings)} reprocessed chunks in vector store for document {document.id}")
+            
+            # Save new chunks to database
+            for chunk_data in chunks_with_embeddings:
                 chunk = DocumentChunkModel(
                     id=chunk_data["id"],
                     content=chunk_data["content"],
-                    chunk_index=chunk_data["metadata"]["chunk_index"],
+                    chunk_index=chunk_data["meta"]["chunk_index"],
                     meta=chunk_data["meta"],
                     document_id=document.id
                 )
                 db.add(chunk)
             
             document.content = content
-            document.chunk_count = len(chunks)
+            document.chunk_count = len(chunks_with_embeddings)
             document.status = DocumentStatus.COMPLETED.value
             
             await db.commit()

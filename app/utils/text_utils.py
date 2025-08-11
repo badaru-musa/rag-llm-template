@@ -61,8 +61,8 @@ def format_file_size(size_bytes: int) -> str:
 
 def chunk_text(
     text: str,
-    chunk_size: int = 1000,
-    chunk_overlap: int = 200,
+    chunk_size: int = 15000,
+    chunk_overlap: int = 1000,
     separators: List[str] = None
 ) -> List[str]:
     """Split text into chunks with optional overlap"""

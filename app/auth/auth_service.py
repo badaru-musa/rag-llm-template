@@ -115,6 +115,44 @@ class AuthService:
             await db.rollback()
             logger.error(f"Error creating user: {str(e)}")
             raise AuthenticationError("Failed to create user")
+        
+    async def admin_create_user(self, user_data: UserCreate, current_admin: UserResponse, db: AsyncSession) -> User:
+        """Admin user create new user account"""
+        try:
+            # Check if user already exists
+            stmt = select(User).where(
+                (User.username == user_data.username) | (User.email == user_data.email)
+            )
+            result = await db.execute(stmt)
+            existing_user = result.scalar_one_or_none()
+            
+            if existing_user:
+                raise AuthenticationError("User with this username or email already exists")
+            
+            # Create new user
+            hashed_password = self.get_password_hash(user_data.password)
+            new_user = User(
+                email=user_data.email,
+                username=user_data.username,
+                full_name=user_data.full_name,
+                hashed_password=hashed_password,
+                role=user_data.role.value if hasattr(user_data.role, 'value') else user_data.role,
+                is_active=True
+            )
+            
+            db.add(new_user)
+            await db.commit()
+            await db.refresh(new_user)
+            
+            logger.info(f"Admin {current_admin.username} created new user: {new_user.username}")
+            return new_user
+            
+        except AuthenticationError:
+            raise
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"Error creating user: {str(e)}")
+            raise AuthenticationError("Failed to create user")
     
     async def get_user_by_id(self, user_id: int, db: AsyncSession) -> Optional[User]:
         """Get user by ID"""

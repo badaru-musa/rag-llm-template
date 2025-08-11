@@ -109,7 +109,7 @@ async def get_user_conversations(
                 message_count=conv["message_count"],
                 created_at=conv["created_at"],
                 updated_at=conv["updated_at"],
-                metadata=conv["metadata"]
+                meta=conv["meta"]  # Fixed: changed from metadata to meta
             )
             for conv in conversations
         ]
@@ -161,7 +161,7 @@ async def get_conversation(
                 "role": msg.role,
                 "content": msg.content,
                 "timestamp": msg.created_at.isoformat(),
-                "metadata": msg.metadata
+                "metadata": msg.meta  # Fixed: changed from metadata to meta
             })
         
         return {
@@ -171,7 +171,7 @@ async def get_conversation(
             "message_count": conversation.message_count,
             "created_at": conversation.created_at.isoformat(),
             "updated_at": conversation.updated_at.isoformat(),
-            "metadata": conversation.metadata,
+            "metadata": conversation.meta,  # Fixed: changed from metadata to meta
             "messages": messages
         }
         
@@ -218,12 +218,18 @@ async def delete_conversation(
         )
 
 
+from pydantic import BaseModel, Field
+
+class SearchRequest(BaseModel):
+    """Search request schema"""
+    query: str = Field(..., description="Search query")
+    max_results: int = Field(default=5, ge=1, le=20, description="Maximum results to return")
+    similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Similarity threshold")
+    document_ids: Optional[List[str]] = Field(default=None, description="Filter by document IDs")
+
 @router.post("/search", response_model=List[DocumentChunk])
 async def search_documents(
-    query: str,
-    max_results: int = 5,
-    similarity_threshold: float = 0.7,
-    document_ids: Optional[List[str]] = None,
+    search_request: SearchRequest,
     current_user: UserResponse = Depends(get_current_active_user),
     chat_service: ChatService = Depends(get_chat_service)
 ):
@@ -231,11 +237,11 @@ async def search_documents(
     try:
         # Use the document retriever from chat service
         chunks = await chat_service.document_retriever.retrieve_relevant_chunks(
-            query=query,
+            query=search_request.query,
             user_id=current_user.id,
-            document_ids=document_ids,
-            max_chunks=max_results,
-            similarity_threshold=similarity_threshold
+            document_ids=search_request.document_ids,
+            max_chunks=search_request.max_results,
+            similarity_threshold=search_request.similarity_threshold
         )
         
         return chunks
@@ -313,7 +319,7 @@ async def create_conversation(
             id=str(uuid.uuid4()),
             title=conversation_data.title,
             user_id=current_user.id,
-            metadata=conversation_data.metadata or {}
+            meta=conversation_data.meta or {}  # Fixed: changed from metadata to meta
         )
         
         db.add(conversation)

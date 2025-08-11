@@ -13,8 +13,8 @@ class DocumentProcessor:
     
     def __init__(
         self,
-        chunk_size: int = 1000,
-        chunk_overlap: int = 200,
+        chunk_size: int = 15000,
+        chunk_overlap: int = 1000,
         embedding_service: BaseEmbeddingService = None
     ):
         self.chunk_size = chunk_size
@@ -172,31 +172,60 @@ class DocumentProcessor:
     
     async def process_chunks_with_embeddings(
         self,
-        chunks: List[Dict[str, Any]]
+        chunks: List[Dict[str, Any]],
+        batch_size: int = 5000  # Process embeddings in batches to avoid token limits
     ) -> List[Dict[str, Any]]:
-        """Process chunks and add embeddings"""
+        """Process chunks and add embeddings in batches"""
         
         if not self.embedding_service:
             logger.warning("No embedding service provided, skipping embedding generation")
             return chunks
         
+        if not chunks:
+            return chunks
+        
         try:
-            # Extract content for embedding
-            contents = [chunk["content"] for chunk in chunks]
+            logger.info(f"Processing embeddings for {len(chunks)} chunks in batches of {batch_size}")
             
-            # Generate embeddings
-            embeddings = await self.embedding_service.embed_texts(contents)
+            # Process chunks in batches to avoid token limits
+            for i in range(0, len(chunks), batch_size):
+                batch_end = min(i + batch_size, len(chunks))
+                batch_chunks = chunks[i:batch_end]
+                
+                # Extract content for this batch
+                batch_contents = [chunk["content"] for chunk in batch_chunks]
+                
+                try:
+                    # Generate embeddings for this batch
+                    batch_embeddings = await self.embedding_service.embed_texts(batch_contents)
+                    
+                    # Add embeddings to chunks in this batch
+                    for j, chunk in enumerate(batch_chunks):
+                        chunk["embedding"] = batch_embeddings[j]
+                    
+                    logger.info(f"Generated embeddings for batch {i//batch_size + 1} ({len(batch_chunks)} chunks)")
+                    
+                except Exception as batch_error:
+                    logger.error(f"Error generating embeddings for batch {i//batch_size + 1}: {str(batch_error)}")
+                    # Try processing this batch one by one if batch fails
+                    for chunk in batch_chunks:
+                        try:
+                            embedding = await self.embedding_service.embed_text(chunk["content"])
+                            chunk["embedding"] = embedding
+                        except Exception as single_error:
+                            logger.error(f"Failed to embed chunk {chunk['id']}: {str(single_error)}")
+                            # Continue without embedding for this chunk
+                            chunk["embedding"] = None
             
-            # Add embeddings to chunks
-            for i, chunk in enumerate(chunks):
-                chunk["embedding"] = embeddings[i]
+            # Count successfully embedded chunks
+            embedded_count = sum(1 for chunk in chunks if chunk.get("embedding") is not None)
+            logger.info(f"Successfully generated embeddings for {embedded_count}/{len(chunks)} chunks")
             
-            logger.info(f"Generated embeddings for {len(chunks)} chunks")
             return chunks
             
         except Exception as e:
-            logger.error(f"Error generating embeddings for chunks: {str(e)}")
-            # Return chunks without embeddings rather than failing
+            logger.error(f"Error processing chunks with embeddings: {str(e)}")
+            # Return chunks without embeddings rather than failing completely
             return chunks
     
     def validate_file(

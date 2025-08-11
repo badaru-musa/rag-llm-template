@@ -92,16 +92,31 @@ class ChromaVectorStore:
         """Search for similar documents"""
         try:
             if not self.collection:
-                raise VectorStoreError("ChromaDB collection not initialized")
+                logger.warning("ChromaDB collection not initialized, attempting to initialize...")
+                await self.initialize()
             
+            # Log collection stats before search
+            try:
+                count = self.collection.count()
+                logger.info(f"Collection has {count} documents before search")
+            except:
+                pass
+            
+            # Generate query embedding
             query_embedding = await self.embedding_service.embed_text(query)
+            logger.info(f"Generated query embedding for: '{query[:50]}...'")
             
+            # Perform search
+            logger.info(f"Searching with n_results={n_results}, where={where}")
             results = self.collection.query(
                 query_embeddings=[query_embedding],
                 n_results=n_results,
                 where=where,
                 include=["documents", "metadatas", "distances"]
             )
+            
+            # Log raw results
+            logger.info(f"Raw search results - documents found: {len(results.get('documents', [[]])[0])}")
             
             # Format results
             formatted_results = []
@@ -113,6 +128,7 @@ class ChromaVectorStore:
                     
                     # Apply score threshold if specified
                     if score_threshold and similarity_score < score_threshold:
+                        logger.debug(f"Skipping result with score {similarity_score} below threshold {score_threshold}")
                         continue
                     
                     formatted_results.append({
@@ -122,7 +138,7 @@ class ChromaVectorStore:
                         "score": similarity_score
                     })
             
-            logger.info(f"Found {len(formatted_results)} similar documents for query")
+            logger.info(f"Found {len(formatted_results)} similar documents for query after filtering")
             return formatted_results
             
         except Exception as e:

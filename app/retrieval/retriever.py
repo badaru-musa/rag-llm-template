@@ -29,21 +29,45 @@ class DocumentRetriever:
         """Retrieve relevant document chunks for a query"""
         
         try:
+            # Ensure vector store is initialized
+            if not self.vector_store.collection:
+                await self.vector_store.initialize()
+                logger.info("Initialized vector store in retriever")
+            
             # Use provided parameters or defaults
             max_chunks = max_chunks or self.max_chunks
             similarity_threshold = similarity_threshold or self.similarity_threshold
             
             # Build where clause for filtering
+            # Ensure user_id is an integer for proper filtering
             where_clause = None
             if user_id and document_ids:
+                # Convert document_ids to integers if they're strings of numbers
+                doc_ids = []
+                for doc_id in document_ids:
+                    try:
+                        doc_ids.append(int(doc_id) if isinstance(doc_id, str) and doc_id.isdigit() else doc_id)
+                    except:
+                        doc_ids.append(doc_id)
+                
                 where_clause = {"$and": [
-                    {"user_id": {"$eq": user_id}},
-                    {"document_id": {"$in": document_ids}}
+                    {"user_id": {"$eq": int(user_id) if isinstance(user_id, (str, float)) else user_id}},
+                    {"document_id": {"$in": doc_ids}}
                 ]}
             elif user_id:
-                where_clause = {"user_id": {"$eq": user_id}}
+                # Ensure user_id is an integer
+                where_clause = {"user_id": {"$eq": int(user_id) if isinstance(user_id, (str, float)) else user_id}}
             elif document_ids:
-                where_clause = {"document_id": {"$in": document_ids}}
+                # Convert document_ids to integers if they're strings of numbers
+                doc_ids = []
+                for doc_id in document_ids:
+                    try:
+                        doc_ids.append(int(doc_id) if isinstance(doc_id, str) and doc_id.isdigit() else doc_id)
+                    except:
+                        doc_ids.append(doc_id)
+                where_clause = {"document_id": {"$in": doc_ids}}
+            
+            logger.info(f"Searching with query: '{query[:50]}...', user_id: {user_id}, where_clause: {where_clause}")
             
             results = await self.vector_store.search(
                 query=query,
@@ -78,10 +102,13 @@ class DocumentRetriever:
         """Retrieve all chunks for a specific document"""
         
         try:
+            # Ensure proper type conversion for filtering
+            doc_id = int(document_id) if isinstance(document_id, str) and document_id.isdigit() else document_id
+            
             where_clause = {"$and": [
-                {"document_id": {"$eq": str(document_id)}},
-                {"user_id": {"$eq": user_id}}
-            ]} if user_id else {"document_id": {"$eq": str(document_id)}}
+                {"document_id": {"$eq": doc_id}},
+                {"user_id": {"$eq": int(user_id) if isinstance(user_id, (str, float)) else user_id}}
+            ]} if user_id else {"document_id": {"$eq": doc_id}}
             
             results = await self.vector_store.search(
                 query="",  # Empty query to get all matching documents

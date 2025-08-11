@@ -51,11 +51,18 @@ class ChatService:
             # Retrieve relevant context if enabled
             relevant_chunks = []
             if use_vector_search:
+                # Ensure vector store is initialized
+                if not self.document_retriever.vector_store.collection:
+                    await self.document_retriever.vector_store.initialize()
+                    logger.info("Initialized vector store for search")
+                
                 relevant_chunks = await self.document_retriever.retrieve_relevant_chunks(
                     query=request.message,
                     user_id=user_id,
-                    max_chunks=request.max_chunks
+                    max_chunks=request.max_chunks,
+                    similarity_threshold=0.3  # Lower threshold for better recall
                 )
+                logger.info(f"Retrieved {len(relevant_chunks)} chunks for query: {request.message[:50]}...")
             
             # Build messages for LLM
             messages = await self._build_llm_messages(
@@ -81,7 +88,7 @@ class ChatService:
                 message=response_content,
                 conversation_id=conversation_id,
                 sources=relevant_chunks,
-                metadata={
+                meta={
                     "use_vector_search": use_vector_search,
                     "chunks_retrieved": len(relevant_chunks),
                     "model_used": self.llm_service.__class__.__name__
@@ -119,11 +126,18 @@ class ChatService:
             # Retrieve relevant context if enabled
             relevant_chunks = []
             if use_vector_search:
+                # Ensure vector store is initialized
+                if not self.document_retriever.vector_store.collection:
+                    await self.document_retriever.vector_store.initialize()
+                    logger.info("Initialized vector store for streaming search")
+                
                 relevant_chunks = await self.document_retriever.retrieve_relevant_chunks(
                     query=request.message,
                     user_id=user_id,
-                    max_chunks=request.max_chunks
+                    max_chunks=request.max_chunks,
+                    similarity_threshold=0.3  # Lower threshold for better recall
                 )
+                logger.info(f"Retrieved {len(relevant_chunks)} chunks for streaming query")
             
             # Build messages for LLM
             messages = await self._build_llm_messages(
@@ -206,7 +220,7 @@ class ChatService:
                     id=conversation_id,
                     user_id=user_id,
                     title=None,  # Will be set later if needed
-                    metadata={}
+                    meta={}
                 )
                 db.add(conversation)
                 await db.commit()
@@ -283,8 +297,10 @@ class ChatService:
         
         # Add conversation history
         for msg in chat_history:
+            # Handle both enum and string types
+            role_value = msg.role.value if hasattr(msg.role, 'value') else str(msg.role)
             messages.append({
-                "role": msg.role.value,
+                "role": role_value,
                 "content": msg.content
             })
         
@@ -314,7 +330,7 @@ class ChatService:
                 conversation_id=conversation_id,
                 role=ChatRole.USER.value,
                 content=user_message,
-                metadata={}
+                meta={}
             )
             db.add(user_msg)
             
@@ -323,7 +339,7 @@ class ChatService:
                 conversation_id=conversation_id,
                 role=ChatRole.ASSISTANT.value,
                 content=assistant_response,
-                metadata={}
+                meta={}
             )
             db.add(assistant_msg)
             
@@ -374,7 +390,7 @@ class ChatService:
                     "message_count": conv.message_count,
                     "created_at": conv.created_at.isoformat(),
                     "updated_at": conv.updated_at.isoformat(),
-                    "metadata": conv.metadata
+                    "meta": conv.meta
                 })
             
             return conversation_list
