@@ -3,6 +3,8 @@ services:
     build: .
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:password@db:5432/ragllm
       - REDIS_URL=redis://redis:6379/0

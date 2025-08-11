@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, env="PORT")
 
     # Database Configuration
-    database_url: str = Field(env="DATABASE_URL")
+    database_url: str = Field(default="sqlite+aiosqlite:///./data/db/app.db", env="DATABASE_URL")
     redis_url: Optional[str] = Field(default=None, env="REDIS_URL")
 
     # Email settings (optional)
@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     azure_openai_model_name: str = Field(default="gpt-4", env="AZURE_OPENAI_MODEL_NAME")
 
     # OpenAI Configuration
-    openai_api_key: Optional[str] = Field(default='api-key', env="OPENAI_API_KEY")
-    openai_model: str = Field(default="gpt-4.1-nano", env="OPENAI_MODEL")
+    openai_api_key: Optional[str] = Field(default=None, env="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-4", env="OPENAI_MODEL")
 
     # Anthropic Configuration
     anthropic_api_key: Optional[str] = Field(default=None, env="ANTHROPIC_API_KEY")
@@ -68,8 +68,8 @@ class Settings(BaseSettings):
     # RAG Configuration
     use_vector_search: bool = Field(default=True, env="USE_VECTOR_SEARCH")
     max_chunks_returned: int = Field(default=5, env="MAX_CHUNKS_RETURNED")
-    chunk_size: int = Field(default=1000, env="CHUNK_SIZE")
-    chunk_overlap: int = Field(default=200, env="CHUNK_OVERLAP")
+    chunk_size: int = Field(default=15000, env="CHUNK_SIZE")
+    chunk_overlap: int = Field(default=1000, env="CHUNK_OVERLAP")
     similarity_threshold: float = Field(default=0.7, env="SIMILARITY_THRESHOLD")
 
     # Authentication
@@ -88,9 +88,11 @@ class Settings(BaseSettings):
         env="LOG_FORMAT"
     )
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    model_config = {
+        "env_file": ".env",
+        "case_sensitive": False,
+        "extra": "ignore"
+    }
 
 
 # Global settings instance

@@ -18,9 +18,9 @@ from datetime import datetime
 from app.auth.dependencies import get_current_active_user
 from app.dependencies import get_auth_service, get_database_session
 from app.auth.auth_service import AuthService
-from app.schema import UserResponse, UserCreate, UserUpdate
+from app.schema import UserResponse, UserCreate, UserUpdate, RoleCreate, RoleResponse, DocumentPermissionCreate, DocumentPermissionResponse
 from app.db.database import get_database_session
-from app.db.models import User, Document, Conversation
+from app.db.models import User, Document, Conversation, Role, DocumentPermission
 from app.enums import UserRole
 from app.exceptions import DatabaseError, ValidationError, AuthenticationError
 from app.logger import logger
@@ -567,4 +567,343 @@ async def get_system_overview(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve system statistics"
+        )
+
+
+@router.post("/roles", response_model=RoleResponse, status_code=status.HTTP_201_CREATED)
+async def create_role(
+    role_data: RoleCreate,
+    current_admin: UserResponse = Depends(require_admin_role),
+    db: AsyncSession = Depends(get_database_session)
+):
+    """
+    Create a new role (Admin only).
+    
+    This endpoint allows administrators to create custom roles with specific permissions.
+    Roles can be assigned to users and used to control access to documents and features.
+    """
+    try:
+        # Check if role with same name already exists
+        existing_role_stmt = select(Role).where(Role.name == role_data.name)
+        existing_role_result = await db.execute(existing_role_stmt)
+        existing_role = existing_role_result.scalar_one_or_none()
+        
+        if existing_role:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Role with name '{role_data.name}' already exists"
+            )
+        
+        # Create new role
+        new_role = Role(
+            name=role_data.name,
+            description=role_data.description,
+            permissions=role_data.permissions or {},
+            created_by=current_admin.id
+        )
+        
+        db.add(new_role)
+        await db.commit()
+        await db.refresh(new_role)
+        
+        logger.info(f"Admin {current_admin.username} created new role: {role_data.name}")
+        
+        return RoleResponse(
+            id=new_role.id,
+            name=new_role.name,
+            description=new_role.description,
+            permissions=new_role.permissions,
+            created_by=new_role.created_by,
+            created_at=new_role.created_at,
+            updated_at=new_role.updated_at
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating role: {str(e)}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create role"
+        )
+
+
+@router.get("/roles", response_model=List[RoleResponse])
+async def list_roles(
+    skip: int = 0,
+    limit: int = 50,
+    current_admin: UserResponse = Depends(require_admin_role),
+    db: AsyncSession = Depends(get_database_session)
+):
+    """
+    List all custom roles (Admin only).
+    
+    This endpoint allows administrators to view all custom roles in the system.
+    """
+    try:
+        query = select(Role).order_by(Role.created_at.desc()).offset(skip).limit(limit)
+        result = await db.execute(query)
+        roles = result.scalars().all()
+        
+        return [RoleResponse(
+            id=role.id,
+            name=role.name,
+            description=role.description,
+            permissions=role.permissions,
+            created_by=role.created_by,
+            created_at=role.created_at,
+            updated_at=role.updated_at
+        ) for role in roles]
+        
+    except Exception as e:
+        logger.error(f"Error listing roles: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve roles"
+        )
+
+
+@router.post("/documents/{document_id}/permissions", response_model=DocumentPermissionResponse, status_code=status.HTTP_201_CREATED)
+async def create_document_permission(
+    document_id: int,
+    permission_data: DocumentPermissionCreate,
+    current_admin: UserResponse = Depends(require_admin_role),
+    db: AsyncSession = Depends(get_database_session)
+):
+    """
+    Grant document access permissions to users or roles (Admin only).
+    
+    This endpoint allows administrators to control who has access to specific documents.
+    Permissions can be granted to individual users or to roles.
+    """
+    try:
+        # Verify the document exists and belongs to the admin
+        document_stmt = select(Document).where(Document.id == document_id)
+        document_result = await db.execute(document_stmt)
+        document = document_result.scalar_one_or_none()
+        
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+        
+        # Check that admin owns the document (only document owners can grant permissions)
+        if document.user_id != current_admin.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only grant permissions for documents you own"
+            )
+        
+        # Validate that either user_id or role_id is provided, but not both
+        if not permission_data.user_id and not permission_data.role_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either user_id or role_id must be provided"
+            )
+        
+        if permission_data.user_id and permission_data.role_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot specify both user_id and role_id"
+            )
+        
+        # If user_id provided, verify the user exists
+        if permission_data.user_id:
+            user_stmt = select(User).where(User.id == permission_data.user_id)
+            user_result = await db.execute(user_stmt)
+            user = user_result.scalar_one_or_none()
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+        
+        # If role_id provided, verify the role exists
+        if permission_data.role_id:
+            role_stmt = select(Role).where(Role.id == permission_data.role_id)
+            role_result = await db.execute(role_stmt)
+            role = role_result.scalar_one_or_none()
+            if not role:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Role not found"
+                )
+        
+        # Check if permission already exists
+        existing_permission_stmt = select(DocumentPermission).where(
+            and_(
+                DocumentPermission.document_id == document_id,
+                or_(
+                    DocumentPermission.user_id == permission_data.user_id,
+                    DocumentPermission.role_id == permission_data.role_id
+                )
+            )
+        )
+        existing_permission_result = await db.execute(existing_permission_stmt)
+        existing_permission = existing_permission_result.scalar_one_or_none()
+        
+        if existing_permission:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Permission already exists for this user/role and document"
+            )
+        
+        # Create new permission
+        new_permission = DocumentPermission(
+            document_id=document_id,
+            user_id=permission_data.user_id,
+            role_id=permission_data.role_id,
+            can_read=permission_data.can_read,
+            can_write=permission_data.can_write,
+            can_delete=permission_data.can_delete,
+            can_share=permission_data.can_share,
+            granted_by=current_admin.id,
+            expires_at=permission_data.expires_at
+        )
+        
+        db.add(new_permission)
+        await db.commit()
+        await db.refresh(new_permission)
+        
+        target = f"user {permission_data.user_id}" if permission_data.user_id else f"role {permission_data.role_id}"
+        logger.info(f"Admin {current_admin.username} granted document permissions to {target} for document {document_id}")
+        
+        return DocumentPermissionResponse(
+            id=new_permission.id,
+            document_id=new_permission.document_id,
+            user_id=new_permission.user_id,
+            role_id=new_permission.role_id,
+            can_read=new_permission.can_read,
+            can_write=new_permission.can_write,
+            can_delete=new_permission.can_delete,
+            can_share=new_permission.can_share,
+            granted_by=new_permission.granted_by,
+            expires_at=new_permission.expires_at,
+            created_at=new_permission.created_at,
+            updated_at=new_permission.updated_at
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating document permission: {str(e)}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create document permission"
+        )
+
+
+@router.get("/documents/{document_id}/permissions", response_model=List[DocumentPermissionResponse])
+async def list_document_permissions(
+    document_id: int,
+    current_admin: UserResponse = Depends(require_admin_role),
+    db: AsyncSession = Depends(get_database_session)
+):
+    """
+    List all permissions for a specific document (Admin only).
+    
+    This endpoint allows administrators to view who has access to a specific document.
+    """
+    try:
+        # Verify the document exists
+        document_stmt = select(Document).where(Document.id == document_id)
+        document_result = await db.execute(document_stmt)
+        document = document_result.scalar_one_or_none()
+        
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+        
+        # Get all permissions for this document
+        permissions_stmt = select(DocumentPermission).where(DocumentPermission.document_id == document_id)
+        permissions_result = await db.execute(permissions_stmt)
+        permissions = permissions_result.scalars().all()
+        
+        return [DocumentPermissionResponse(
+            id=permission.id,
+            document_id=permission.document_id,
+            user_id=permission.user_id,
+            role_id=permission.role_id,
+            can_read=permission.can_read,
+            can_write=permission.can_write,
+            can_delete=permission.can_delete,
+            can_share=permission.can_share,
+            granted_by=permission.granted_by,
+            expires_at=permission.expires_at,
+            created_at=permission.created_at,
+            updated_at=permission.updated_at
+        ) for permission in permissions]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing document permissions: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve document permissions"
+        )
+
+
+@router.delete("/documents/{document_id}/permissions/{permission_id}")
+async def revoke_document_permission(
+    document_id: int,
+    permission_id: int,
+    current_admin: UserResponse = Depends(require_admin_role),
+    db: AsyncSession = Depends(get_database_session)
+):
+    """
+    Revoke document permission (Admin only).
+    
+    This endpoint allows administrators to revoke previously granted document permissions.
+    """
+    try:
+        # Get the permission to revoke
+        permission_stmt = select(DocumentPermission).where(
+            and_(
+                DocumentPermission.id == permission_id,
+                DocumentPermission.document_id == document_id
+            )
+        )
+        permission_result = await db.execute(permission_stmt)
+        permission = permission_result.scalar_one_or_none()
+        
+        if not permission:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Permission not found"
+            )
+        
+        # Verify the document belongs to the admin
+        document_stmt = select(Document).where(Document.id == document_id)
+        document_result = await db.execute(document_stmt)
+        document = document_result.scalar_one_or_none()
+        
+        if not document or document.user_id != current_admin.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only revoke permissions for documents you own"
+            )
+        
+        # Delete the permission
+        await db.delete(permission)
+        await db.commit()
+        
+        target = f"user {permission.user_id}" if permission.user_id else f"role {permission.role_id}"
+        logger.info(f"Admin {current_admin.username} revoked document permission from {target} for document {document_id}")
+        
+        return {"message": "Document permission revoked successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error revoking document permission: {str(e)}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to revoke document permission"
         )
